@@ -32,7 +32,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Global optimizer instance
-optimizer = CampaignOptimizer(time_limit=14400)
+optimizer = CampaignOptimizer(time_limit=None)
 
 
 @router.post("/campaign", response_model=OptimizationResponse)

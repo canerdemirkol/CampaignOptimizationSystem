@@ -6,7 +6,7 @@ Each segment represents a group of customers with aggregated values.
 import logging
 import time
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from pyscipopt import Model, quicksum
 
@@ -47,7 +47,8 @@ class CampaignOptimizer:
     customer_count is used as weight in the optimization model.
     """
 
-    def __init__(self, time_limit: int = 14400):
+    def __init__(self, time_limit: Optional[int] = None):
+        # None means unlimited: solver runs until it reaches a provably optimal solution.
         self.time_limit = time_limit
 
     def optimize(self, request: OptimizationRequest) -> OptimizationResponse:
@@ -132,7 +133,8 @@ class CampaignOptimizer:
                 cp,  # Pass campaign parameters which now includes general parameters
             )
 
-            model.setParam("limits/time", self.time_limit)
+            if self.time_limit is not None:
+                model.setParam("limits/time", self.time_limit)
             model.setParam("limits/gap", 0.0)
             model.setParam("parallel/maxnthreads", 8)
             model.optimize()
@@ -607,7 +609,8 @@ class CampaignOptimizer:
             )
 
             model.hideOutput()
-            model.setRealParam("limits/time", self.time_limit)
+            if self.time_limit is not None:
+                model.setRealParam("limits/time", self.time_limit)
             model.setRealParam("limits/gap", 0.0)
             model.setParam("parallel/maxnthreads", 8)
             model.optimize()

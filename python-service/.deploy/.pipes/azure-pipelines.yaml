@@ -1,0 +1,20 @@
+trigger:
+  branches:
+    include:
+      - main
+  tags:
+    include:
+    - v*
+  paths:
+    exclude:
+      - README.md
+
+resources:
+  repositories:
+    - repository: ci-cd
+      name: devops/ci-cd
+      type: git
+      ref: pipes
+extends:
+  template: obase-etailer/campaign-optimization-py-api/.build-ci.yaml@ci-cd
+

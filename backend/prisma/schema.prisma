@@ -1,0 +1,349 @@
+// Prisma Schema - Campaign Optimization System
+// Master Prompt Section 3 - Domain Model
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User Entity (Aggregate Root) - Section 3.1
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  email        String   @unique
+  role         UserRole @default(USER)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  USER
+  VIEWER
+}
+
+// Refresh Token for JWT
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// Customer Entity
+model Customer {
+  id            String   @id @default(uuid())
+  customerNo    String   @unique @map("customer_no")
+  firstName     String   @map("first_name")
+  lastName      String   @map("last_name")
+  email         String   @unique
+  phone         String?
+  age           Int?
+  gender        Gender?
+  segment       String?
+  churnScore    Float?   @map("churn_score")
+  lifetimeValue Float?   @map("lifetime_value")
+  incomeLevelId String?  @map("income_level_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  incomeLevel IncomeLevel? @relation(fields: [incomeLevelId], references: [id], onDelete: SetNull)
+
+  @@map("customers")
+}
+
+enum Gender {
+  M
+  F
+  O
+}
+
+// Campaign Entity (Aggregate Root)
+model Campaign {
+  id   String       @id @default(uuid())
+  name String
+  type CampaignType @default(CRM) @map("type")
+
+  // Campaign-specific parameters (can be overridden per batch)
+  rMin Int   @default(100) @map("r_min")
+  rMax Int   @default(5000) @map("r_max")
+  zK   Float @default(500) @map("z_k") // Campaign profit per customer
+  cK   Float @default(50) @map("c_k") // Campaign cost per customer
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  campaignSegmentScores CampaignCustomerSegmentScore[]
+  scenarioCampaigns     OptimizationScenarioCampaign[]
+  scenarioResults       OptimizationScenarioResult[]
+  resultSummaries       OptimizationResultSummary[]
+  resultDetails         OptimizationResultDetail[]
+
+  @@map("campaigns")
+}
+
+// Campaign Type - For batch optimization (CRM vs MASS)
+enum CampaignType {
+  CRM // Individual customer-based campaigns
+  MASS // Mass campaigns (apply to all or large segments)
+}
+
+// Campaign Parameters Entity - Merged with GeneralParameters
+// Contains both general optimization parameters and campaign-specific parameters
+// Optimization Result Summary Entity
+// Default General Parameters (singleton - global defaults)
+model DefaultGeneralParameters {
+  id        String   @id @default(uuid())
+  cMin      Int      @default(1) @map("c_min")
+  cMax      Int      @default(10) @map("c_max")
+  nMin      Int      @default(1) @map("n_min")
+  nMax      Int      @default(5) @map("n_max")
+  bMin      Float    @default(100) @map("b_min")
+  bMax      Float    @default(10000) @map("b_max")
+  mMin      Int      @default(0) @map("m_min")
+  mMax      Int      @default(3) @map("m_max")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("default_general_parameters")
+}
+
+// Income Level Entity - Predefined income level categories
+model IncomeLevel {
+  id          String   @id @default(uuid())
+  name        String   @unique // Low, Medium, Medium-Low, Medium-High, High
+  displayName String   @map("display_name")
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  customerSegments CustomerSegment[]
+  customers        Customer[]
+
+  @@map("income_levels")
+}
+
+// Customer Segment Entity - Grouped customer data for optimization
+model CustomerSegment {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  description   String?
+  customerCount Int      @map("customer_count")
+  lifetimeValue Float    @map("lifetime_value")
+  incomeLevelId String?  @map("income_level_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  incomeLevel           IncomeLevel?                   @relation(fields: [incomeLevelId], references: [id], onDelete: SetNull)
+  campaignSegmentScores CampaignCustomerSegmentScore[]
+  scenarioResults       OptimizationScenarioResult[]
+  resultDetails         OptimizationResultDetail[]
+
+  @@index([incomeLevelId])
+  @@index([name])
+  @@map("customer_segments")
+}
+
+// Campaign Customer Segment Score - Campaign-specific churn scores for customer segments
+model CampaignCustomerSegmentScore {
+  id                String   @id @default(uuid())
+  campaignId        String   @map("campaign_id")
+  customerSegmentId String   @map("customer_segment_id")
+  score             Float    @map("score") // Churn score specific to this campaign-segment combination
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  campaign        Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customerSegment CustomerSegment @relation(fields: [customerSegmentId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, customerSegmentId])
+  @@index([campaignId])
+  @@index([customerSegmentId])
+  @@map("campaign_customer_segment_scores")
+}
+
+// Optimization Scenario Entity - Groups campaigns for scenario-based optimization
+model OptimizationScenario {
+  id          String         @id @default(uuid())
+  name        String
+  description String?
+  status      ScenarioStatus @default(READY) @map("status")
+
+  // General parameters for scenario
+  cMin Int   @default(1) @map("c_min")
+  cMax Int   @default(10) @map("c_max")
+  nMin Int   @default(1) @map("n_min")
+  nMax Int   @default(5) @map("n_max")
+  bMin Float @default(100) @map("b_min")
+  bMax Float @default(10000) @map("b_max")
+  mMin Int   @default(0) @map("m_min")
+  mMax Int   @default(3) @map("m_max")
+
+  // Decision variables from optimizer (y_k, x_ks_all, x_ks_active, summary)
+  decisionVariables Json? @map("decision_variables")
+
+  // Relations
+  campaigns       OptimizationScenarioCampaign[]
+  results         OptimizationScenarioResult[]
+  resultSummaries OptimizationResultSummary[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("optimization_scenarios")
+}
+
+// Optimization Scenario Campaign - Junction table with campaign snapshot (campaigns in scenario)
+model OptimizationScenarioCampaign {
+  id         String @id @default(uuid())
+  scenarioId String @map("scenario_id")
+  campaignId String @map("campaign_id")
+
+  // Campaign snapshot - values at the time of adding to scenario
+  campaignName String       @map("campaign_name")
+  campaignType CampaignType @map("campaign_type")
+  rMin         Int          @map("r_min")
+  rMax         Int          @map("r_max")
+  zK           Float        @map("z_k")
+  cK           Float        @map("c_k")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  scenario OptimizationScenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  campaign Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([scenarioId, campaignId])
+  @@map("optimization_scenario_campaigns")
+}
+
+// Optimization Scenario Result Entity - Result for each campaign-segment in a scenario
+model OptimizationScenarioResult {
+  id         String               @id @default(uuid())
+  scenarioId String               @map("scenario_id")
+  scenario   OptimizationScenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  segmentId String          @map("segment_id")
+  segment   CustomerSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  // Optimization result details for this campaign-segment combination
+  recommendations Json @default("{}") // Result from Python service
+
+  // Summary stats
+  totalRecommendations Int   @default(0) @map("total_recommendations")
+  totalContribution    Float @default(0) @map("total_profit")
+  estimatedCost        Float @default(0) @map("estimated_cost")
+
+  // Status
+  resultStatus ResultStatus @default(SUCCESS) @map("result_status")
+  errorMessage String?      @map("error_message")
+
+  executedAt DateTime @default(now()) @map("executed_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([scenarioId, campaignId, segmentId])
+  @@map("optimization_scenario_results")
+}
+
+enum ScenarioStatus {
+  READY
+  RUNNING
+  COMPLETED_SUCCESSFULLY
+  FAILED
+}
+
+// Optimization Result Summary - Campaign-level summary
+model OptimizationResultSummary {
+  id         String               @id @default(uuid())
+  scenarioId String               @map("scenario_id")
+  scenario   OptimizationScenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  campaignId String               @map("campaign_id")
+  campaign   Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  // Önerilen kişi sayısı
+  recommendedCustomerCount Int? @map("recommended_customer_count")
+
+  // Tahmini katılım oranı
+  estimatedParticipation Float? @map("estimated_participation")
+
+  // Tahmini katkı (hedef göre: ROI%, Ciro, vb)
+  estimatedContribution Float? @map("estimated_contribution")
+
+  // Tahmini maliyet
+  estimatedCost Float? @map("estimated_cost")
+
+  // Tahmini ROI (%)
+  estimatedRoi Float? @map("estimated_roi")
+
+  // Onay durumu
+  approved Boolean @default(false) @map("approved")
+
+  // Calculation timing
+  calculationStartedAt  DateTime? @map("calculation_started_at")
+  calculationFinishedAt DateTime? @map("calculation_finished_at")
+
+  // Segment detayları
+  details OptimizationResultDetail[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([scenarioId, campaignId])
+  @@map("optimization_result_summaries")
+}
+
+// Optimization Result Detail - Segment-level details
+model OptimizationResultDetail {
+  id        String                    @id @default(uuid())
+  summaryId String                    @map("summary_id")
+  summary   OptimizationResultSummary @relation(fields: [summaryId], references: [id], onDelete: Cascade)
+
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  segmentId String          @map("segment_id")
+  segment   CustomerSegment @relation(fields: [segmentId], references: [id])
+
+  // Normalized optimization result fields
+  score                  Float? @map("score")
+  customerCount          Int?   @map("customer_count")
+  expectedContribution   Float? @map("expected_profit")
+  estimatedParticipation Float? @map("estimated_participation")
+  estimatedCost          Float? @map("estimated_cost")
+
+  // Önerilen kampanyalar (JSON) - eski alan, geriye dönük uyumluluk için korunuyor
+  recommendedCampaigns Json? @map("recommended_campaigns")
+
+  // Calculation timing
+  calculationStartedAt  DateTime? @map("calculation_started_at")
+  calculationFinishedAt DateTime? @map("calculation_finished_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([summaryId, segmentId])
+  @@map("optimization_result_details")
+}
+
+enum ResultStatus {
+  SUCCESS
+  FAILED
+}

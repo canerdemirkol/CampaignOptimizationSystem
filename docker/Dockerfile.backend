@@ -1,0 +1,67 @@
+# Backend Dockerfile - NestJS Application
+FROM node:20-alpine AS builder
+
+# Install openssl for Prisma schema engine
+RUN apk add --no-cache openssl
+
+WORKDIR /app
+
+# Copy package files
+COPY backend/package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY backend/ ./
+
+# Generate Prisma client
+RUN npx prisma generate
+
+# Build NestJS application
+RUN npm run build
+
+# Compile seed script separately (not included in tsconfig src/**)
+RUN npx tsc --project tsconfig.seed.json
+
+# Production stage
+FROM node:20-alpine AS production
+
+WORKDIR /app
+
+# Install wget for healthcheck and openssl for Prisma
+RUN apk add --no-cache wget openssl
+
+# Copy package files
+COPY backend/package*.json ./
+
+# Install production dependencies only
+RUN npm ci --only=production
+
+# Copy built files
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/dist-seed ./dist-seed
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+
+# Generate Prisma client in production stage
+RUN npx prisma generate
+
+# Copy entrypoint script and fix Windows CRLF line endings
+COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Set environment
+ENV NODE_ENV=production
+ENV PORT=3001
+
+# Expose port
+EXPOSE 3001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3001/api/health || exit 1
+
+# Entrypoint: decrypt DATABASE_URL → prisma migrate → start app
+ENTRYPOINT ["docker-entrypoint.sh"]

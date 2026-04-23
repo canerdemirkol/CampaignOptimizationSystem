@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Node modules (her servis kendi build aşamasında yükler)
+backend/node_modules
+frontend/node_modules
+node_modules
+
+# Environment files (hassas bilgiler içerir, env_file ile ayrıca mount edilir)
+.env
+backend/.env
+frontend/.env
+python-service/.env
+
+# Python
+python-service/venv
+python-service/__pycache__
+**/__pycache__
+*.pyc
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+backend/dist
+frontend/dist
+
+# Documentation (Docker image'a gerek yok)
+docs/
+*.md
+!docker/
+
+# Jupyter notebook
+*.ipynb

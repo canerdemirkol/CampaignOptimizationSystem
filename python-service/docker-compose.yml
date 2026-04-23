@@ -1,0 +1,40 @@
+# Python Optimization Service (FastAPI) - Standalone Docker Compose
+# Usage: docker-compose up -d --build
+#
+# Gereksinimler:
+#   - Shared network oluşturulmuş olmalı: docker network create campaign-network
+#
+# Bu servis campaign-network üzerinden diğer servislerle haberleşir:
+#   - backend: http://campaign-backend:3001
+
+services:
+  python-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: campaign-python
+    environment:
+      PYTHONUNBUFFERED: 1
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SOLVER_TIME_LIMIT: ${OPTIMIZATION_TIME_LIMIT:-3600}
+      BACKEND_URL: http://campaign-backend:3001
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-b14ca5898a4e4142aace2ea2143a2410}
+      SERVICE_USERNAME: ${SERVICE_USERNAME:-admin}
+      SERVICE_PASSWORD: ${SERVICE_PASSWORD:-admin123}
+      FILE_LOG_ENABLED: ${FILE_LOG_ENABLED:-false}
+    ports:
+      - "${PYTHON_PORT:-8000}:8000"
+    networks:
+      - campaign-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+networks:
+  campaign-network:
+    external: true

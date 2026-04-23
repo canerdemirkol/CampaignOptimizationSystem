@@ -1,0 +1,43 @@
+# Backend Service (NestJS) - Standalone Docker Compose
+# Usage: docker-compose up -d --build
+#
+# Gereksinimler:
+#   - Shared network oluşturulmuş olmalı: docker network create campaign-network
+#   - .env dosyası bu dizinde veya parent dizinde bulunmalı
+#
+# Bu servis campaign-network üzerinden diğer servislerle haberleşir:
+#   - python-service: http://campaign-python:8000
+#   - frontend: http://campaign-frontend:80
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: campaign-backend
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: ${DATABASE_URL:-postgresql://campaign_user:campaign_pass@host.docker.internal:5432/campaign_optimization?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-OBaseJWTAuthentication2026CampaignOptimization3365}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-b14ca5898a4e4142aace2ea2143a2410}
+      FASTAPI_URL: http://campaign-python:8000
+      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-5173}
+      FILE_LOG_ENABLED: ${FILE_LOG_ENABLED:-false}
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    networks:
+      - campaign-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+networks:
+  campaign-network:
+    external: true

@@ -1,0 +1,36 @@
+# Development Docker Compose
+# Usage: docker-compose -f docker-compose.dev.yml up -d
+#
+# NOT: PostgreSQL Docker'da çalışmıyor, harici (external) PostgreSQL'e bağlanılıyor.
+# Backend .env dosyasındaki DATABASE_URL harici PostgreSQL adresini göstermelidir.
+#
+# Bu dosya sadece Python service'i Docker'da çalıştırır.
+# Backend ve Frontend manual başlatılır (hot-reload için).
+
+services:
+  # Python Optimization Service (FastAPI) - Development mode
+  python-service:
+    build:
+      context: ./python-service
+      dockerfile: Dockerfile
+    container_name: campaign-python-dev
+    environment:
+      PYTHONUNBUFFERED: 1
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: DEBUG
+      FILE_LOG_ENABLED: ${FILE_LOG_ENABLED:-false}
+      SOLVER_TIME_LIMIT: ${OPTIMIZATION_TIME_LIMIT:-3600}
+    ports:
+      - "8000:8000"
+    networks:
+      - campaign-network-dev
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  campaign-network-dev:
+    driver: bridge

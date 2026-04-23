@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "outDir": "dist-seed",
+    "module": "commonjs",
+    "target": "ES2021",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true
+  },
+  "include": ["prisma/seed.ts"]
+}

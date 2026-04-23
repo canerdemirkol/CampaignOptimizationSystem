@@ -1,0 +1,106 @@
+# Campaign Optimization System - Root Docker Compose (Orchestrator)
+#
+# Bu dosya tüm servisleri tek komutla başlatmak için kullanılır.
+# Her servis kendi dizininde bağımsız docker-compose.yml dosyasına sahiptir
+# ve ayrı ayrı da çalıştırılabilir.
+#
+# Tüm servisleri birlikte başlatmak için:
+#   docker-compose up -d --build
+#
+# Tek tek başlatmak için (önce network oluşturun):
+#   docker network create campaign-network
+#   cd backend  && docker-compose up -d --build
+#   cd python-service && docker-compose up -d --build
+#   cd frontend && docker-compose up -d --build
+#
+# PostgreSQL harici sunucuda çalışır.
+# DATABASE_URL .env dosyasından veya environment variable olarak verilmelidir.
+
+# Shared network - tüm servisler bu network üzerinden haberleşir
+networks:
+  campaign-network:
+    driver: bridge
+
+services:
+  # Backend Service (NestJS)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: campaign-backend
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: ${DATABASE_URL:-postgresql://campaign_user:campaign_pass@host.docker.internal:5432/campaign_optimization?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-OBaseJWTAuthentication2026CampaignOptimization3365}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-b14ca5898a4e4142aace2ea2143a2410}
+      FASTAPI_URL: http://campaign-python:8000
+      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-5173}
+      FILE_LOG_ENABLED: ${FILE_LOG_ENABLED:-false}
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    networks:
+      - campaign-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+  # Python Optimization Service (FastAPI)
+  python-service:
+    build:
+      context: ./python-service
+      dockerfile: Dockerfile
+    container_name: campaign-python
+    environment:
+      PYTHONUNBUFFERED: 1
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SOLVER_TIME_LIMIT: ${OPTIMIZATION_TIME_LIMIT:-3600}
+      BACKEND_URL: http://campaign-backend:3001
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-b14ca5898a4e4142aace2ea2143a2410}
+      SERVICE_USERNAME: ${SERVICE_USERNAME:-admin}
+      SERVICE_PASSWORD: ${SERVICE_PASSWORD:-admin123}
+      FILE_LOG_ENABLED: ${FILE_LOG_ENABLED:-false}
+    ports:
+      - "${PYTHON_PORT:-8000}:8000"
+    networks:
+      - campaign-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Frontend Service (React + Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: campaign-frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    networks:
+      - campaign-network
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - BACKEND_HOST=campaign-backend
+      - BACKEND_PORT=3001
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped

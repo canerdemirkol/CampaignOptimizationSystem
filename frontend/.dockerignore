@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Node modules (build aşamasında yüklenir)
+node_modules
+
+# Environment files
+.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+dist
+
+# Documentation
+*.md
+
+# Docker files
+docker-compose.yml
+Dockerfile

@@ -38,14 +38,14 @@ export class OptimizationScenarioService {
         name: dto.name,
         description: dto.description || '',
         status: ScenarioStatus.READY,
-        cMin: dto.cMin ?? defaults?.cMin ?? 1,
-        cMax: dto.cMax ?? defaults?.cMax ?? 10,
+        cMin: dto.cMin ?? defaults?.cMin ?? 0,
+        cMax: dto.cMax ?? defaults?.cMax ?? 20,
         nMin: dto.nMin ?? defaults?.nMin ?? 1,
-        nMax: dto.nMax ?? defaults?.nMax ?? 5,
+        nMax: dto.nMax ?? defaults?.nMax ?? 20,
         bMin: dto.bMin ?? defaults?.bMin ?? 100,
         bMax: dto.bMax ?? defaults?.bMax ?? 10000,
         mMin: dto.mMin ?? defaults?.mMin ?? 0,
-        mMax: dto.mMax ?? defaults?.mMax ?? 3,
+        mMax: dto.mMax ?? defaults?.mMax ?? 10,
       },
       include: {
         campaigns: {
@@ -442,14 +442,14 @@ export class OptimizationScenarioService {
             z_k: campaign.zK ?? 0,
             c_k: campaign.cK ?? 0,
             // General parameters from Scenario (these are required)
-            c_min: scenario.cMin ?? 1,
-            c_max: scenario.cMax ?? 10,
+            c_min: scenario.cMin ?? 0,
+            c_max: scenario.cMax ?? 20,
             n_min: scenario.nMin ?? 1,
-            n_max: scenario.nMax ?? 5,
+            n_max: scenario.nMax ?? 20,
             b_min: scenario.bMin ?? 100,
             b_max: scenario.bMax ?? 10000,
             m_min: scenario.mMin ?? 0,
-            m_max: scenario.mMax ?? 3,
+            m_max: scenario.mMax ?? 10,
           };
 
           console.log(`[SCENARIO ${scenarioId}] Campaign ${campaign.id} merged parameters:`, mergedParameters);

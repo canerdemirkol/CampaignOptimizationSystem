@@ -13,7 +13,7 @@ import {
   AddCampaignsToScenarioDto,
   UpdateDefaultParametersDto,
 } from './dto/optimization-scenario.dto';
-import { ScenarioStatus } from '@prisma/client';
+import { Prisma, ScenarioStatus } from '@prisma/client';
 
 @Injectable()
 export class OptimizationScenarioService {
@@ -540,39 +540,50 @@ export class OptimizationScenarioService {
     // Group results by campaign for summary table
     const summaryByCampaign: Record<string, any> = {};
 
-    // Save results to database
+    // Build all upsert operations first, then execute as a single batch
+    // transaction. Sequentially awaiting 50 upserts per chunk meant 50 DB
+    // round-trips per request, which left each chunk call occupying a Prisma
+    // connection for ~2s and amplified head-of-line blocking under load
+    // (observed symptom: a chunk request sitting in the server for 2+ min
+    // while other work held the pool, exceeding the client's read timeout).
+    // A batched $transaction ships all 50 statements in one round-trip and
+    // releases the connection sooner.
+    const upserts: Prisma.PrismaPromise<any>[] = [];
+
     for (const result of results) {
       if (result.status === 'success') {
         successCount++;
-        await this.prisma.optimizationScenarioResult.upsert({
-          where: {
-            scenarioId_campaignId_segmentId: {
+        upserts.push(
+          this.prisma.optimizationScenarioResult.upsert({
+            where: {
+              scenarioId_campaignId_segmentId: {
+                scenarioId,
+                campaignId: result.campaign_id,
+                segmentId: result.segment_id,
+              },
+            },
+            create: {
               scenarioId,
               campaignId: result.campaign_id,
               segmentId: result.segment_id,
+              recommendations: result.result?.detail_results || [],
+              totalRecommendations: result.result?.summary_result?.recommended_customer_count || 0,
+              totalContribution: result.result?.summary_result?.estimated_contribution || 0,
+              estimatedCost: result.result?.summary_result?.estimated_cost || 0,
+              resultStatus: 'SUCCESS',
+              executedAt: new Date(),
             },
-          },
-          create: {
-            scenarioId,
-            campaignId: result.campaign_id,
-            segmentId: result.segment_id,
-            recommendations: result.result?.detail_results || [],
-            totalRecommendations: result.result?.summary_result?.recommended_customer_count || 0,
-            totalContribution: result.result?.summary_result?.estimated_contribution || 0,
-            estimatedCost: result.result?.summary_result?.estimated_cost || 0,
-            resultStatus: 'SUCCESS',
-            executedAt: new Date(),
-          },
-          update: {
-            recommendations: result.result?.detail_results || [],
-            totalRecommendations: result.result?.summary_result?.recommended_customer_count || 0,
-            totalContribution: result.result?.summary_result?.estimated_contribution || 0,
-            estimatedCost: result.result?.summary_result?.estimated_cost || 0,
-            resultStatus: 'SUCCESS',
-            executedAt: new Date(),
-            updatedAt: new Date(),
-          },
-        });
+            update: {
+              recommendations: result.result?.detail_results || [],
+              totalRecommendations: result.result?.summary_result?.recommended_customer_count || 0,
+              totalContribution: result.result?.summary_result?.estimated_contribution || 0,
+              estimatedCost: result.result?.summary_result?.estimated_cost || 0,
+              resultStatus: 'SUCCESS',
+              executedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          }),
+        );
 
         // Collect data for summary and details tables
         const campaignId = result.campaign_id;
@@ -597,30 +608,36 @@ export class OptimizationScenarioService {
         });
       } else {
         failureCount++;
-        await this.prisma.optimizationScenarioResult.upsert({
-          where: {
-            scenarioId_campaignId_segmentId: {
+        upserts.push(
+          this.prisma.optimizationScenarioResult.upsert({
+            where: {
+              scenarioId_campaignId_segmentId: {
+                scenarioId,
+                campaignId: result.campaign_id,
+                segmentId: result.segment_id,
+              },
+            },
+            create: {
               scenarioId,
               campaignId: result.campaign_id,
               segmentId: result.segment_id,
+              resultStatus: 'FAILED',
+              errorMessage: result.error,
+              executedAt: new Date(),
             },
-          },
-          create: {
-            scenarioId,
-            campaignId: result.campaign_id,
-            segmentId: result.segment_id,
-            resultStatus: 'FAILED',
-            errorMessage: result.error,
-            executedAt: new Date(),
-          },
-          update: {
-            resultStatus: 'FAILED',
-            errorMessage: result.error,
-            executedAt: new Date(),
-            updatedAt: new Date(),
-          },
-        });
+            update: {
+              resultStatus: 'FAILED',
+              errorMessage: result.error,
+              executedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          }),
+        );
       }
+    }
+
+    if (upserts.length > 0) {
+      await this.prisma.$transaction(upserts);
     }
 
     // Aggregate metrics and save summaries ONLY on the final chunk.

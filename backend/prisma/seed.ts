@@ -28,14 +28,14 @@ const CAMPAIGN_R_MAX = 200000;
 
 // General parameter bounds (per user spec)
 const DEFAULT_PARAMS = {
-  cMin: 5,
-  cMax: 10, // Selectable CRM campaign count
+  cMin: 0,
+  cMax: 20, // Selectable CRM campaign count
   nMin: 1,
-  nMax: 5, // Per-customer campaign count
+  nMax: 20, // Per-customer campaign count
   bMin: 100,
   bMax: 50_000_000,
-  mMin: 2,
-  mMax: 5, // Selectable MASS campaign count
+  mMin: 0,
+  mMax: 10, // Selectable MASS campaign count
 };
 
 // Batch sizes for bulk inserts

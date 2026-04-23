@@ -133,7 +133,7 @@ class CampaignOptimizer:
             )
 
             model.setParam("limits/time", self.time_limit)
-            #model.setParam("limits/gap", 0.01)
+            model.setParam("limits/gap", 0.0)
             model.setParam("parallel/maxnthreads", 8)
             model.optimize()
 
@@ -608,7 +608,7 @@ class CampaignOptimizer:
 
             model.hideOutput()
             model.setRealParam("limits/time", self.time_limit)
-           #model.setRealParam("limits/gap", 0.01)
+            model.setRealParam("limits/gap", 0.0)
             model.setParam("parallel/maxnthreads", 8)
             model.optimize()
 

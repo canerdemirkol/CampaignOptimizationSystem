@@ -2,6 +2,7 @@
 Optimization API Endpoints
 Master Prompt Section 4.2 - FastAPI Endpoint
 """
+import asyncio
 import logging
 import httpx
 import json
@@ -608,6 +609,13 @@ async def _process_scenario_optimization(
                 chunk_size = 50
                 total_chunks = (len(results) + chunk_size - 1) // chunk_size
 
+                # Per-chunk timeout sized for the backend's worst observed case:
+                # a single chunk's upserts plus any head-of-line blocking from
+                # other NestJS work that delays picking up the request.
+                per_chunk_timeout = 120.0
+                max_attempts = 4  # 1 initial + 3 retries with 2s/4s/8s backoff
+                failed_chunks: list[int] = []
+
                 for chunk_num in range(total_chunks):
                     start_idx = chunk_num * chunk_size
                     end_idx = min(start_idx + chunk_size, len(results))
@@ -625,53 +633,117 @@ async def _process_scenario_optimization(
                         f"({len(chunk_results)} results, size: {len(json.dumps(request_body))} bytes)"
                     )
 
-                    response = await client.post(
-                        callback_url,
-                        json=request_body,
-                        timeout=30.0,
-                        headers=auth_headers if auth_headers else None,
-                    )
+                    # Send one chunk with retries + per-chunk error isolation:
+                    # transient failures (timeouts, network errors, 5xx, 408, 429)
+                    # are retried with exponential backoff; permanent failures log
+                    # and skip to the next chunk so one bad chunk cannot abort
+                    # the entire scenario upload. Backend upserts are idempotent
+                    # (keyed by scenarioId+campaignId+segmentId) so retrying a
+                    # chunk that silently succeeded is safe.
+                    chunk_error: Optional[str] = None
+                    chunk_succeeded = False
 
-                    # Token cached client-side for 14 minutes; long chunk runs
-                    # can outlive it and start getting 401 mid-stream. Force a
-                    # fresh token and retry the same chunk once before giving up.
-                    if response.status_code == 401:
-                        write_log(
-                            f"Chunk {chunk_num + 1}: got HTTP 401, refreshing auth token and retrying",
-                            level="WARNING",
-                        )
+                    for attempt in range(1, max_attempts + 1):
                         try:
-                            auth_headers = await auth_service.get_auth_headers(force_refresh=True)
                             response = await client.post(
                                 callback_url,
                                 json=request_body,
-                                timeout=30.0,
-                                headers=auth_headers,
+                                timeout=per_chunk_timeout,
+                                headers=auth_headers if auth_headers else None,
                             )
+
+                            # Token cached client-side for 14 minutes; long chunk runs
+                            # can outlive it and start getting 401 mid-stream. Force a
+                            # fresh token and retry the same chunk once before giving up.
+                            if response.status_code == 401:
+                                write_log(
+                                    f"Chunk {chunk_num + 1} attempt {attempt}: got HTTP 401, "
+                                    f"refreshing auth token and retrying",
+                                    level="WARNING",
+                                )
+                                try:
+                                    auth_headers = await auth_service.get_auth_headers(force_refresh=True)
+                                    response = await client.post(
+                                        callback_url,
+                                        json=request_body,
+                                        timeout=per_chunk_timeout,
+                                        headers=auth_headers,
+                                    )
+                                except Exception as refresh_error:
+                                    chunk_error = f"auth refresh failed: {refresh_error}"
+                                    write_log(
+                                        f"Chunk {chunk_num + 1}: {chunk_error}",
+                                        level="ERROR",
+                                    )
+                                    break  # non-retryable: can't auth
+
+                            # Retryable server-side failures: 5xx, plus 408 Request
+                            # Timeout and 429 Too Many Requests. Other 4xx are
+                            # client-side bugs (bad payload, etc.) and won't fix
+                            # themselves on retry, so fail the chunk immediately.
+                            if response.status_code >= 500 or response.status_code in (408, 429):
+                                chunk_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                                if attempt < max_attempts:
+                                    backoff = 2 ** attempt  # 2, 4, 8 seconds
+                                    write_log(
+                                        f"Chunk {chunk_num + 1} attempt {attempt}/{max_attempts} "
+                                        f"failed ({chunk_error}). Retrying in {backoff}s",
+                                        level="WARNING",
+                                    )
+                                    await asyncio.sleep(backoff)
+                                    continue
+                                break  # attempts exhausted
+
                             write_log(
-                                f"Chunk {chunk_num + 1}/{total_chunks} retry after refresh. "
+                                f"Chunk {chunk_num + 1}/{total_chunks} sent to backend. "
                                 f"HTTP Status: {response.status_code}"
                             )
-                        except Exception as refresh_error:
-                            write_log(
-                                f"Chunk {chunk_num + 1}: auth refresh failed: {refresh_error}",
-                                level="ERROR",
-                            )
+                            if response.text:
+                                write_log(f"Backend response for chunk {chunk_num + 1}: {response.text}")
 
-                    write_log(
-                        f"Chunk {chunk_num + 1}/{total_chunks} sent to backend. "
-                        f"HTTP Status: {response.status_code}"
-                    )
-                    if response.text:
-                        write_log(f"Backend response for chunk {chunk_num + 1}: {response.text}")
+                            if response.status_code >= 400:
+                                chunk_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                                break  # non-retryable 4xx
 
-                    if response.status_code >= 400:
+                            chunk_succeeded = True
+                            break
+
+                        except httpx.TransportError as e:
+                            # Network / timeout / protocol errors are retryable.
+                            chunk_error = f"{type(e).__name__}: {e}"
+                            if attempt < max_attempts:
+                                backoff = 2 ** attempt  # 2, 4, 8 seconds
+                                write_log(
+                                    f"Chunk {chunk_num + 1} attempt {attempt}/{max_attempts} "
+                                    f"failed ({chunk_error}). Retrying in {backoff}s",
+                                    level="WARNING",
+                                )
+                                await asyncio.sleep(backoff)
+                                continue
+                            break  # attempts exhausted
+                        except Exception as e:
+                            # Unexpected error: don't retry blindly.
+                            chunk_error = f"{type(e).__name__}: {e}"
+                            break
+
+                    if not chunk_succeeded:
+                        failed_chunks.append(chunk_num + 1)
                         write_log(
-                            f"Error sending chunk {chunk_num + 1}: HTTP {response.status_code}",
-                            level="ERROR"
+                            f"Chunk {chunk_num + 1}/{total_chunks} gave up after "
+                            f"{max_attempts} attempt(s): {chunk_error}",
+                            level="ERROR",
                         )
 
-                write_log(f"All {total_chunks} chunks sent to backend successfully")
+                if failed_chunks:
+                    preview = failed_chunks[:20]
+                    suffix = f" (+{len(failed_chunks) - 20} more)" if len(failed_chunks) > 20 else ""
+                    write_log(
+                        f"{len(failed_chunks)}/{total_chunks} chunks failed after all retries: "
+                        f"{preview}{suffix}",
+                        level="ERROR",
+                    )
+                else:
+                    write_log(f"All {total_chunks} chunks sent to backend successfully")
             except Exception as e:
                 write_log(f"Failed to send results to backend: {str(e)}", level="ERROR")
 

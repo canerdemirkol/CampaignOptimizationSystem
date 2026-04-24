@@ -673,6 +673,15 @@ export class OptimizationScenarioService {
         `[SCENARIO ${scenarioId}] All chunks received (${successCount} success, ${failureCount} failed). Aggregating final results...`,
       );
 
+      // Persist decision variables immediately so the export endpoint works
+      // even if Stage B aggregation below fails partway through.
+      if (decisionVariables) {
+        await this.prisma.optimizationScenario.update({
+          where: { id: scenarioId },
+          data: { decisionVariables },
+        });
+      }
+
       // Fetch ALL successful results for this scenario from database (across all chunks)
       const allResults = await this.prisma.optimizationScenarioResult.findMany({
         where: { scenarioId, resultStatus: 'SUCCESS' },
@@ -891,12 +900,11 @@ export class OptimizationScenarioService {
         this.logger.warn(`Scenario completed with partial failures: ${successCount} success, ${failureCount} failed`, 'Scenario');
       }
 
+      // decisionVariables was persisted earlier (right after the idempotency
+      // guard) so it survives even if Stage B fails partway through.
       await this.prisma.optimizationScenario.update({
         where: { id: scenarioId },
-        data: {
-          status: finalStatus,
-          ...(decisionVariables ? { decisionVariables } : {}),
-        },
+        data: { status: finalStatus },
       });
     }
 

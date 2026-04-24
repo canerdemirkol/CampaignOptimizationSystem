@@ -647,6 +647,28 @@ export class OptimizationScenarioService {
     //          but each contained ALL campaigns in recommended_campaigns, causing N× overcounting.
     //   Bug 2: Each chunk's upsert overwrote previous chunk's summary values instead of accumulating.
     if (chunkNumber === totalChunks) {
+      // Idempotency guard: if Stage B already completed for this scenario, skip.
+      // Protects against retry storms when the HTTP client resends the final
+      // chunk after a timeout while backend is still processing the first call.
+      const existingScenario = await this.prisma.optimizationScenario.findUnique({
+        where: { id: scenarioId },
+        select: { status: true },
+      });
+      if (
+        existingScenario?.status === ScenarioStatus.COMPLETED_SUCCESSFULLY ||
+        existingScenario?.status === ScenarioStatus.FAILED
+      ) {
+        console.log(
+          `[SCENARIO ${scenarioId}] Final chunk received again but aggregation already completed (status=${existingScenario.status}). Skipping Stage B.`,
+        );
+        return {
+          message: 'Final chunk retried; aggregation already completed',
+          successCount,
+          failureCount,
+          chunk: `${chunkNumber}/${totalChunks}`,
+        };
+      }
+
       console.log(
         `[SCENARIO ${scenarioId}] All chunks received (${successCount} success, ${failureCount} failed). Aggregating final results...`,
       );
@@ -803,37 +825,33 @@ export class OptimizationScenarioService {
           },
         });
 
-        // Save segment details
-        for (const segmentInfo of (metrics as any).segments) {
-          await this.prisma.optimizationResultDetail.upsert({
-            where: {
-              summaryId_segmentId: {
+        // Save segment details in a single batched transaction.
+        // Sequential upserts across ~10K segments × many campaigns previously
+        // saturated the DB connection and caused "Server has closed the
+        // connection" errors, which in turn triggered client-side retry storms.
+        const segments = (metrics as any).segments as Array<any>;
+        if (segments.length > 0) {
+          const now = new Date();
+          await this.prisma.$transaction([
+            this.prisma.optimizationResultDetail.deleteMany({
+              where: { summaryId: resultSummary.id },
+            }),
+            this.prisma.optimizationResultDetail.createMany({
+              data: segments.map((s) => ({
                 summaryId: resultSummary.id,
-                segmentId: segmentInfo.segmentId,
-              },
-            },
-            create: {
-              summaryId: resultSummary.id,
-              campaignId,
-              segmentId: segmentInfo.segmentId,
-              score: segmentInfo.score,
-              customerCount: segmentInfo.customerCount,
-              expectedContribution: segmentInfo.expectedContribution,
-              estimatedParticipation: segmentInfo.estimatedParticipation,
-              estimatedCost: segmentInfo.estimatedCost,
-              calculationStartedAt: new Date(),
-              calculationFinishedAt: new Date(),
-            },
-            update: {
-              score: segmentInfo.score,
-              customerCount: segmentInfo.customerCount,
-              expectedContribution: segmentInfo.expectedContribution,
-              estimatedParticipation: segmentInfo.estimatedParticipation,
-              estimatedCost: segmentInfo.estimatedCost,
-              calculationFinishedAt: new Date(),
-              updatedAt: new Date(),
-            },
-          });
+                campaignId,
+                segmentId: s.segmentId,
+                score: s.score,
+                customerCount: s.customerCount,
+                expectedContribution: s.expectedContribution,
+                estimatedParticipation: s.estimatedParticipation,
+                estimatedCost: s.estimatedCost,
+                calculationStartedAt: now,
+                calculationFinishedAt: now,
+              })),
+              skipDuplicates: true,
+            }),
+          ]);
         }
 
         console.log(

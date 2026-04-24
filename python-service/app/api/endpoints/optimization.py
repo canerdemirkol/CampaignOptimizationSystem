@@ -628,6 +628,13 @@ async def _process_scenario_optimization(
                         "scenario_id": scenario_id,
                     }
 
+                    # Attach solver decision variables to the final chunk only.
+                    # Backend persists them on the scenario row for later export
+                    # via /export-decision-variables. Sending with every chunk
+                    # would duplicate the payload and bloat retries.
+                    if chunk_num + 1 == total_chunks and decision_vars:
+                        request_body["decision_variables"] = decision_vars
+
                     write_log(
                         f"Sending chunk {chunk_num + 1}/{total_chunks} "
                         f"({len(chunk_results)} results, size: {len(json.dumps(request_body))} bytes)"

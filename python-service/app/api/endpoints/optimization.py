@@ -194,6 +194,157 @@ async def optimize_scenario(
     }
 
 
+# Each x_ks_all entry serializes to ~150 bytes; 5000 entries ≈ 750 KB per
+# chunk, comfortably under the NestJS body-parser default of 1 MB while
+# keeping the number of round-trips reasonable for ~250 K-entry payloads.
+_DV_X_KS_ALL_CHUNK_SIZE = 5000
+
+
+async def _upload_decision_variables_chunked(
+    *,
+    client: "httpx.AsyncClient",
+    url: str,
+    decision_vars: Dict[str, Any],
+    auth_service,
+    auth_headers: Dict[str, str],
+    write_log,
+) -> Dict[str, str]:
+    """
+    Upload solver decision variables to the backend in chunks.
+
+    The payload is dominated by x_ks_all (CRM × segment cartesian product) so
+    we slice that list into fixed-size pages. The first page also carries the
+    small fields (y_k, x_ks_active, summary); subsequent pages only carry
+    their slice of x_ks_all keyed by chunk_number so the backend can
+    reassemble the full list on the final chunk.
+
+    Retries follow the same shape as the result-chunk loop: transport errors,
+    5xx, 408 and 429 are retried with 2/4/8 s exponential backoff; 401
+    refreshes the token once and retries; other 4xx fails the chunk.
+
+    Returns the (possibly refreshed) auth headers so the caller can reuse
+    them for any subsequent backend calls.
+    """
+    x_ks_all = decision_vars.get("x_ks_all") or []
+    bulk_chunks = max(1, (len(x_ks_all) + _DV_X_KS_ALL_CHUNK_SIZE - 1) // _DV_X_KS_ALL_CHUNK_SIZE)
+
+    write_log(
+        f"Uploading decision_variables in {bulk_chunks} chunk(s) "
+        f"({len(x_ks_all)} x_ks_all entries)"
+    )
+
+    per_chunk_timeout = 120.0
+    max_attempts = 4
+
+    for chunk_idx in range(bulk_chunks):
+        start = chunk_idx * _DV_X_KS_ALL_CHUNK_SIZE
+        end = min(start + _DV_X_KS_ALL_CHUNK_SIZE, len(x_ks_all))
+        x_partial = x_ks_all[start:end]
+
+        partial: Dict[str, Any] = {"x_ks_all_partial": x_partial}
+        if chunk_idx == 0:
+            # Small fields ride the first chunk so the row is usable for export
+            # even if a later chunk fails partway through.
+            partial["y_k"] = decision_vars.get("y_k", [])
+            partial["x_ks_active"] = decision_vars.get("x_ks_active", [])
+            partial["summary"] = decision_vars.get("summary", {})
+
+        body = {
+            "chunk_number": chunk_idx + 1,
+            "total_chunks": bulk_chunks,
+            "partial": partial,
+        }
+
+        write_log(
+            f"Sending DV chunk {chunk_idx + 1}/{bulk_chunks} "
+            f"(x_ks_all entries: {len(x_partial)}, "
+            f"size: {len(json.dumps(body))} bytes)"
+        )
+
+        chunk_succeeded = False
+        chunk_error: Optional[str] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await client.post(
+                    url,
+                    json=body,
+                    timeout=per_chunk_timeout,
+                    headers=auth_headers if auth_headers else None,
+                )
+
+                if response.status_code == 401:
+                    write_log(
+                        f"DV chunk {chunk_idx + 1}: HTTP 401, refreshing token",
+                        level="WARNING",
+                    )
+                    try:
+                        auth_headers = await auth_service.get_auth_headers(force_refresh=True)
+                        response = await client.post(
+                            url,
+                            json=body,
+                            timeout=per_chunk_timeout,
+                            headers=auth_headers,
+                        )
+                    except Exception as refresh_error:
+                        chunk_error = f"auth refresh failed: {refresh_error}"
+                        write_log(f"DV chunk {chunk_idx + 1}: {chunk_error}", level="ERROR")
+                        break
+
+                if response.status_code >= 500 or response.status_code in (408, 429):
+                    chunk_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    if attempt < max_attempts:
+                        backoff = 2 ** attempt
+                        write_log(
+                            f"DV chunk {chunk_idx + 1} attempt {attempt}/{max_attempts} "
+                            f"failed ({chunk_error}). Retrying in {backoff}s",
+                            level="WARNING",
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    break
+
+                if response.status_code >= 400:
+                    chunk_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    write_log(f"DV chunk {chunk_idx + 1} failed: {chunk_error}", level="ERROR")
+                    break
+
+                write_log(
+                    f"DV chunk {chunk_idx + 1}/{bulk_chunks} sent. "
+                    f"HTTP Status: {response.status_code}"
+                )
+                chunk_succeeded = True
+                break
+
+            except httpx.TransportError as e:
+                chunk_error = f"{type(e).__name__}: {e}"
+                if attempt < max_attempts:
+                    backoff = 2 ** attempt
+                    write_log(
+                        f"DV chunk {chunk_idx + 1} attempt {attempt}/{max_attempts} "
+                        f"failed ({chunk_error}). Retrying in {backoff}s",
+                        level="WARNING",
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                break
+            except Exception as e:
+                chunk_error = f"{type(e).__name__}: {e}"
+                break
+
+        if not chunk_succeeded:
+            write_log(
+                f"DV chunk {chunk_idx + 1}/{bulk_chunks} gave up: {chunk_error}",
+                level="ERROR",
+            )
+            # Stop on first failure: subsequent chunks rely on prior ones
+            # already being written for the final assembly to be correct.
+            return auth_headers
+
+    write_log(f"All {bulk_chunks} decision-variable chunk(s) uploaded")
+    return auth_headers
+
+
 async def _process_scenario_optimization(
     scenario_id: str,
     global_segments: list[Dict[str, Any]],
@@ -642,12 +793,12 @@ async def _process_scenario_optimization(
                         "scenario_id": scenario_id,
                     }
 
-                    # Attach solver decision variables to the final chunk only.
-                    # Backend persists them on the scenario row for later export
-                    # via /export-decision-variables. Sending with every chunk
-                    # would duplicate the payload and bloat retries.
-                    if chunk_num + 1 == total_chunks and decision_vars:
-                        request_body["decision_variables"] = decision_vars
+                    # Decision variables are sent separately via the dedicated
+                    # /decision-variables endpoint after all result chunks
+                    # succeed. They used to ride on the final result chunk, but
+                    # for large scenarios x_ks_all (CRM × segment cartesian
+                    # product) made the payload tens of MB and tripped the
+                    # backend body-parser 413 limit.
 
                     write_log(
                         f"Sending chunk {chunk_num + 1}/{total_chunks} "
@@ -765,6 +916,23 @@ async def _process_scenario_optimization(
                     )
                 else:
                     write_log(f"All {total_chunks} chunks sent to backend successfully")
+
+                # Upload decision variables in their own chunked stream. x_ks_all
+                # alone can be tens of MB for large scenarios, so it has to be
+                # split — see _upload_decision_variables_chunked for sizing.
+                if decision_vars:
+                    dv_url = (
+                        f"{backend_url}/api/optimization-scenarios/"
+                        f"{scenario_id}/decision-variables"
+                    )
+                    auth_headers = await _upload_decision_variables_chunked(
+                        client=client,
+                        url=dv_url,
+                        decision_vars=decision_vars,
+                        auth_service=auth_service,
+                        auth_headers=auth_headers,
+                        write_log=write_log,
+                    )
             except Exception as e:
                 write_log(f"Failed to send results to backend: {str(e)}", level="ERROR")
 

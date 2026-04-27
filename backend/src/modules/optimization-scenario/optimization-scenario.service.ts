@@ -916,6 +916,80 @@ export class OptimizationScenarioService {
     };
   }
 
+  // ── HANDLE DECISION VARIABLES CHUNK (Callback from Python) ──
+  // Decision variables (solver y[k] / x[k,s]) are uploaded separately from
+  // result chunks because x_ks_all (CRM × segment cartesian product) can be
+  // tens of MB for large scenarios — well over the body-parser 1 MB default
+  // that the regular /complete chunks fit under.
+  //
+  // Each call carries:
+  //   chunk_number, total_chunks
+  //   partial: { x_ks_all_partial: [...], (chunk 1 only) y_k, x_ks_active, summary }
+  //
+  // We accumulate x_ks_all slices in scenario.decisionVariables._x_ks_all_chunks
+  // keyed by chunk_number. Re-receiving the same chunk overwrites the same key
+  // so retries are idempotent. On the final chunk we sort the keys, flatten
+  // into a single x_ks_all array, drop the temporary map, and persist the
+  // assembled decisionVariables.
+  async handleDecisionVariablesChunk(
+    scenarioId: string,
+    chunkNumber: number,
+    totalChunks: number,
+    partial: any,
+  ) {
+    if (!partial || typeof chunkNumber !== 'number' || typeof totalChunks !== 'number') {
+      return { error: 'Missing chunk_number, total_chunks or partial' };
+    }
+
+    console.log(
+      `[SCENARIO ${scenarioId}] DV chunk ${chunkNumber}/${totalChunks} received`,
+    );
+
+    const scenario = await this.prisma.optimizationScenario.findUnique({
+      where: { id: scenarioId },
+      select: { decisionVariables: true },
+    });
+    const existing: any = (scenario?.decisionVariables as any) ?? {};
+
+    if (partial.y_k !== undefined) existing.y_k = partial.y_k;
+    if (partial.x_ks_active !== undefined) existing.x_ks_active = partial.x_ks_active;
+    if (partial.summary !== undefined) existing.summary = partial.summary;
+
+    const chunks: Record<string, any[]> = existing._x_ks_all_chunks ?? {};
+    if (Array.isArray(partial.x_ks_all_partial)) {
+      chunks[String(chunkNumber)] = partial.x_ks_all_partial;
+    }
+    existing._x_ks_all_chunks = chunks;
+
+    if (chunkNumber === totalChunks) {
+      const sortedKeys = Object.keys(chunks)
+        .map(Number)
+        .sort((a, b) => a - b);
+      const assembled: any[] = [];
+      for (const k of sortedKeys) {
+        const slice = chunks[String(k)];
+        if (Array.isArray(slice)) assembled.push(...slice);
+      }
+      existing.x_ks_all = assembled;
+      delete existing._x_ks_all_chunks;
+
+      console.log(
+        `[SCENARIO ${scenarioId}] DV final chunk: assembled ${assembled.length} x_ks_all entries from ${sortedKeys.length} pieces`,
+      );
+    }
+
+    await this.prisma.optimizationScenario.update({
+      where: { id: scenarioId },
+      data: { decisionVariables: existing },
+    });
+
+    return {
+      message: 'ok',
+      chunk: `${chunkNumber}/${totalChunks}`,
+      assembled: chunkNumber === totalChunks,
+    };
+  }
+
   // ── GET CAMPAIGN RESULTS ──
   async getCampaignResults(scenarioId: string) {
     // Fetch scenario with campaigns

@@ -195,6 +195,23 @@ export class OptimizationScenarioController {
     );
   }
 
+  @Post(':id/decision-variables')
+  @ApiOperation({
+    summary:
+      'Chunked callback endpoint for FastAPI to upload solver decision variables',
+  })
+  async submitDecisionVariables(
+    @Param('id') id: string,
+    @Body() body: any,
+  ) {
+    return this.optimizationScenarioService.handleDecisionVariablesChunk(
+      id,
+      body.chunk_number,
+      body.total_chunks,
+      body.partial,
+    );
+  }
+
   @Get(':id/export-decision-variables')
   @Roles('ADMIN', 'USER')
   @ApiOperation({ summary: 'Export decision variables as Excel file with multiple sheets' })

@@ -31,8 +31,16 @@ class ScenarioOptimizationRequest(BaseModel):
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Global optimizer instance
-optimizer = CampaignOptimizer(time_limit=None)
+# Global optimizer instance.
+# Time limit comes from the OPTIMIZATION_TIME_LIMIT env var (seconds). If unset
+# or invalid, the solver runs without a wall-clock cap.
+_time_limit_env = os.getenv("OPTIMIZATION_TIME_LIMIT")
+try:
+    _time_limit = int(_time_limit_env) if _time_limit_env else None
+except ValueError:
+    logger.warning(f"Invalid OPTIMIZATION_TIME_LIMIT={_time_limit_env!r}, ignoring")
+    _time_limit = None
+optimizer = CampaignOptimizer(time_limit=_time_limit)
 
 
 @router.post("/campaign", response_model=OptimizationResponse)
@@ -65,7 +73,10 @@ async def optimize_campaign(
     )
 
     try:
-        result = optimizer.optimize(optimization_request)
+        # Run the blocking SCIPOpt solve in a worker thread so the asyncio
+        # event loop stays responsive — otherwise /health stops answering and
+        # the kubelet liveness probe kills the pod mid-solve.
+        result = await asyncio.to_thread(optimizer.optimize, optimization_request)
 
         logger.info(
             f"Optimization completed: status={result.status}, "
@@ -423,7 +434,10 @@ async def _process_scenario_optimization(
                 f"Running optimization with {len(campaign_params_objs)} campaigns × "
                 f"{len(all_customer_segments)} segments..."
             )
-            result = optimizer.optimize_scenario(optimization_request)
+            # Offload the blocking SCIPOpt solve to a worker thread; otherwise
+            # the C call freezes the asyncio loop, /health stops answering,
+            # and the liveness probe kills the pod mid-calculation.
+            result = await asyncio.to_thread(optimizer.optimize_scenario, optimization_request)
             write_log(f"Optimization completed. Status: {result.status}")
 
             # Log decision variables (x[k,s] and y[k]) from the optimizer

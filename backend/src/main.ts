@@ -10,6 +10,13 @@ import { HttpLoggingInterceptor } from './infrastructure/logger/http-logging.int
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Raise the JSON body-parser limit. The Python optimizer's
+  // /decision-variables callback ships ~1–5 MB per chunk for large
+  // scenarios (CRM × segment cartesian product); the default 100 KB
+  // would reject every one of them with HTTP 413.
+  app.useBodyParser('json', { limit: '50mb' });
+  app.useBodyParser('urlencoded', { limit: '50mb', extended: true });
+
   // Custom logger & HTTP logging interceptor
   const appLogger = app.get(AppLoggerService);
   app.useLogger(appLogger);

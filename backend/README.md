@@ -69,9 +69,15 @@ npm run encrypt-env
 # Seed data yükle
 npx prisma db seed
 
-# Development server başlat
+# Development server başlat (hot-reload)
 npm run start:dev
+
+# Veya reload'suz başlat (uzun süren optimizasyon jobs için önerilir)
+npm run start
 ```
+
+> ⚠️ **Uzun süren optimizasyonlar (10K+ segment) için `npm run start` kullanın.**
+> `start:dev` watch modunda herhangi bir `.ts` dosyası değişirse Nest process'i yeniden başlar ve python-service'e açık olan HTTP isteği kopar. `npm run start` watch'ı devre dışı bırakır; Docker zaten watch'sız çalışır (`dist/main.js` production build).
 
 ### Docker ile Çalıştırma
 
@@ -204,9 +210,10 @@ Detaylı API referansı için: [docs/API_ENDPOINTS.md](../docs/API_ENDPOINTS.md)
 ## Npm Scripts
 
 ```bash
-npm run start:dev      # Development (hot-reload)
+npm run start          # Local run, watch YOK (uzun süren jobs için önerilir)
+npm run start:dev      # Development (hot-reload, .ts değişiminde restart)
 npm run build          # Production build
-npm run start:prod     # Production start
+npm run start:prod     # Production start (dist/main.js)
 npm run test           # Unit tests
 npm run test:cov       # Test coverage
 npm run lint           # ESLint

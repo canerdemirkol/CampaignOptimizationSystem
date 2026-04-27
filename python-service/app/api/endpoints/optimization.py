@@ -32,7 +32,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Global optimizer instance
-optimizer = CampaignOptimizer(time_limit=14400)
+optimizer = CampaignOptimizer(time_limit=None)
 
 
 @router.post("/campaign", response_model=OptimizationResponse)
@@ -627,6 +627,13 @@ async def _process_scenario_optimization(
                         "total_chunks": total_chunks,
                         "scenario_id": scenario_id,
                     }
+
+                    # Attach solver decision variables to the final chunk only.
+                    # Backend persists them on the scenario row for later export
+                    # via /export-decision-variables. Sending with every chunk
+                    # would duplicate the payload and bloat retries.
+                    if chunk_num + 1 == total_chunks and decision_vars:
+                        request_body["decision_variables"] = decision_vars
 
                     write_log(
                         f"Sending chunk {chunk_num + 1}/{total_chunks} "

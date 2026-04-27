@@ -280,12 +280,22 @@ pip install -r requirements.txt
 ### Çalıştırma
 
 ```bash
-# Development
+# Stable run (no reload) - uzun süren optimizasyon jobs için önerilir
+make run
+# eşdeğeri:
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Development (hot reload) - aktif kod geliştirirken
+make run-dev
+# eşdeğeri:
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Production
+# Production (multi-worker)
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
+
+> ⚠️ **Uzun süren optimizasyonlar (10K+ segment) için `make run` kullanın.**
+> `--reload` modunda herhangi bir `.py` dosyası değişirse uvicorn process'i yeniden başlar ve çalışan SCIP solver iptal olur. `make run` reload'ı kapatır; Docker zaten reload'sız çalışır (`Dockerfile`'daki `CMD` etkilenmez).
 
 ### Docker
 

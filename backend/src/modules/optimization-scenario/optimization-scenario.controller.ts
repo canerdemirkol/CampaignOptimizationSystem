@@ -198,17 +198,15 @@ export class OptimizationScenarioController {
   @Post(':id/decision-variables')
   @ApiOperation({
     summary:
-      'Chunked callback endpoint for FastAPI to upload solver decision variables',
+      'Callback endpoint for FastAPI to persist solver decision variables in a single POST',
   })
   async submitDecisionVariables(
     @Param('id') id: string,
     @Body() body: any,
   ) {
-    return this.optimizationScenarioService.handleDecisionVariablesChunk(
+    return this.optimizationScenarioService.persistDecisionVariables(
       id,
-      body.chunk_number,
-      body.total_chunks,
-      body.partial,
+      body.decision_variables,
     );
   }
 

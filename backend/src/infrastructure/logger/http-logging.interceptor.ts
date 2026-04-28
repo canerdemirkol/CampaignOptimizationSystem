@@ -28,32 +28,49 @@ export class HttpLoggingInterceptor implements NestInterceptor {
     // Set trace ID on response header for downstream services
     response.setHeader('X-Correlation-ID', traceId);
 
-    // Sanitize request body - remove sensitive fields
-    const sanitizedBody = this.sanitizeBody(body);
+    // Skip serializing the body for large requests. The body-parser limit
+    // is 50 MB to accommodate the Python optimizer's decision_variables
+    // callback; running JSON.stringify on a 36 MB body and writing it
+    // synchronously to stdout was saturating the log pipeline badly
+    // enough that unrelated requests (auth/login) started returning
+    // HTTP 500.
+    const contentLength = Number(headers['content-length'] || 0);
+    const sanitizedBody =
+      contentLength > 100_000
+        ? { _truncated: true, _contentLength: contentLength }
+        : this.sanitizeBody(body);
 
     return next.handle().pipe(
       tap((responseBody) => {
-        const duration = Date.now() - startTime;
-        this.logger.logHttpRequest({
-          method,
-          url: originalUrl,
-          requestBody: sanitizedBody,
-          responseStatus: response.statusCode,
-          responseBody: this.truncateResponse(responseBody),
-          duration,
-          traceId,
-        });
+        try {
+          const duration = Date.now() - startTime;
+          this.logger.logHttpRequest({
+            method,
+            url: originalUrl,
+            requestBody: sanitizedBody,
+            responseStatus: response.statusCode,
+            responseBody: this.truncateResponse(responseBody),
+            duration,
+            traceId,
+          });
+        } catch {
+          // Logging must never fail a request — swallow.
+        }
       }),
       catchError((error) => {
-        const duration = Date.now() - startTime;
-        this.logger.logHttpError({
-          method,
-          url: originalUrl,
-          requestBody: sanitizedBody,
-          error: error.message || String(error),
-          duration,
-          traceId,
-        });
+        try {
+          const duration = Date.now() - startTime;
+          this.logger.logHttpError({
+            method,
+            url: originalUrl,
+            requestBody: sanitizedBody,
+            error: error.message || String(error),
+            duration,
+            traceId,
+          });
+        } catch {
+          // Logging must never fail a request — swallow.
+        }
         return throwError(() => error);
       }),
     );

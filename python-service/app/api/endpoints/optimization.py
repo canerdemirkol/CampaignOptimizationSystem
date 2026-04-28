@@ -194,6 +194,121 @@ async def optimize_scenario(
     }
 
 
+async def _upload_decision_variables(
+    *,
+    client: "httpx.AsyncClient",
+    url: str,
+    decision_vars: Dict[str, Any],
+    auth_service,
+    auth_headers: Dict[str, str],
+    write_log,
+) -> Dict[str, str]:
+    """
+    Upload solver decision variables to the backend in a single POST.
+
+    A previous version split x_ks_all into 5 K-entry chunks and had the
+    backend merge each chunk into scenario.decisionVariables. That made
+    each chunk's read-modify-write grow with the number of already-
+    uploaded chunks (O(N²) total work) and started timing out / 500'ing
+    around chunk 28-29 once the merged JSON crossed ~25 MB.
+
+    The body-parser limit on the backend is 50 MB and decision_variables
+    fits comfortably under that for any realistic scenario, so we send
+    the whole payload at once and let the backend write it atomically.
+
+    Same retry shape as the result-chunk loop: transport errors, 5xx,
+    408 and 429 retry with 2/4/8 s backoff; 401 refreshes the token
+    once. Returns the (possibly refreshed) auth headers.
+    """
+    body = {"decision_variables": decision_vars}
+    payload_bytes = len(json.dumps(body))
+
+    # Generous timeout: a single 30-50 MB POST plus a JSONB write of the
+    # same size on the backend can take a while under load.
+    timeout = 300.0
+    max_attempts = 4
+
+    write_log(
+        f"Uploading decision_variables in a single POST "
+        f"({len(decision_vars.get('x_ks_all') or [])} x_ks_all entries, "
+        f"size: {payload_bytes} bytes)"
+    )
+
+    last_error: Optional[str] = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await client.post(
+                url,
+                json=body,
+                timeout=timeout,
+                headers=auth_headers if auth_headers else None,
+            )
+
+            if response.status_code == 401:
+                write_log(
+                    f"decision_variables upload: HTTP 401, refreshing token",
+                    level="WARNING",
+                )
+                try:
+                    auth_headers = await auth_service.get_auth_headers(force_refresh=True)
+                    response = await client.post(
+                        url,
+                        json=body,
+                        timeout=timeout,
+                        headers=auth_headers,
+                    )
+                except Exception as refresh_error:
+                    last_error = f"auth refresh failed: {refresh_error}"
+                    write_log(f"decision_variables: {last_error}", level="ERROR")
+                    return auth_headers
+
+            if response.status_code >= 500 or response.status_code in (408, 429):
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                if attempt < max_attempts:
+                    backoff = 2 ** attempt
+                    write_log(
+                        f"decision_variables attempt {attempt}/{max_attempts} "
+                        f"failed ({last_error}). Retrying in {backoff}s",
+                        level="WARNING",
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                break
+
+            if response.status_code >= 400:
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                write_log(f"decision_variables upload failed: {last_error}", level="ERROR")
+                return auth_headers
+
+            write_log(
+                f"decision_variables uploaded. HTTP Status: {response.status_code}"
+            )
+            return auth_headers
+
+        except httpx.TransportError as e:
+            last_error = f"{type(e).__name__}: {e}"
+            if attempt < max_attempts:
+                backoff = 2 ** attempt
+                write_log(
+                    f"decision_variables attempt {attempt}/{max_attempts} "
+                    f"failed ({last_error}). Retrying in {backoff}s",
+                    level="WARNING",
+                )
+                await asyncio.sleep(backoff)
+                continue
+            break
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+            break
+
+    write_log(
+        f"decision_variables upload gave up after {max_attempts} attempt(s): {last_error}",
+        level="ERROR",
+    )
+    return auth_headers
+
+
 async def _process_scenario_optimization(
     scenario_id: str,
     global_segments: list[Dict[str, Any]],
@@ -642,12 +757,12 @@ async def _process_scenario_optimization(
                         "scenario_id": scenario_id,
                     }
 
-                    # Attach solver decision variables to the final chunk only.
-                    # Backend persists them on the scenario row for later export
-                    # via /export-decision-variables. Sending with every chunk
-                    # would duplicate the payload and bloat retries.
-                    if chunk_num + 1 == total_chunks and decision_vars:
-                        request_body["decision_variables"] = decision_vars
+                    # Decision variables are sent separately via the dedicated
+                    # /decision-variables endpoint after all result chunks
+                    # succeed. They used to ride on the final result chunk, but
+                    # for large scenarios x_ks_all (CRM × segment cartesian
+                    # product) made the payload tens of MB and tripped the
+                    # backend body-parser 413 limit.
 
                     write_log(
                         f"Sending chunk {chunk_num + 1}/{total_chunks} "
@@ -765,6 +880,24 @@ async def _process_scenario_optimization(
                     )
                 else:
                     write_log(f"All {total_chunks} chunks sent to backend successfully")
+
+                # Upload decision variables in a single POST. Body-parser is
+                # 50 MB; decision_variables fit under that for realistic
+                # scenarios, and a single write avoids the O(N²) read-modify-
+                # write that earlier per-chunk merging suffered from.
+                if decision_vars:
+                    dv_url = (
+                        f"{backend_url}/api/optimization-scenarios/"
+                        f"{scenario_id}/decision-variables"
+                    )
+                    auth_headers = await _upload_decision_variables(
+                        client=client,
+                        url=dv_url,
+                        decision_vars=decision_vars,
+                        auth_service=auth_service,
+                        auth_headers=auth_headers,
+                        write_log=write_log,
+                    )
             except Exception as e:
                 write_log(f"Failed to send results to backend: {str(e)}", level="ERROR")
 

@@ -195,6 +195,21 @@ export class OptimizationScenarioController {
     );
   }
 
+  @Post(':id/decision-variables')
+  @ApiOperation({
+    summary:
+      'Callback endpoint for FastAPI to persist solver decision variables in a single POST',
+  })
+  async submitDecisionVariables(
+    @Param('id') id: string,
+    @Body() body: any,
+  ) {
+    return this.optimizationScenarioService.persistDecisionVariables(
+      id,
+      body.decision_variables,
+    );
+  }
+
   @Get(':id/export-decision-variables')
   @Roles('ADMIN', 'USER')
   @ApiOperation({ summary: 'Export decision variables as Excel file with multiple sheets' })

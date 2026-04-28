@@ -916,6 +916,30 @@ export class OptimizationScenarioService {
     };
   }
 
+  // ── PERSIST DECISION VARIABLES (Callback from Python) ──
+  // Decision variables (solver y[k] / x[k,s]) arrive in a single POST after
+  // all result chunks have been written. main.ts raises the body-parser cap
+  // to 50 MB so even large scenarios (CRM × segment cartesian product around
+  // ~36 MB) fit. Writing in one shot avoids the O(N²) read-modify-write the
+  // previous chunked merge suffered from.
+  async persistDecisionVariables(scenarioId: string, decisionVariables: any) {
+    if (!decisionVariables || typeof decisionVariables !== 'object') {
+      return { error: 'Missing decision_variables payload' };
+    }
+
+    console.log(
+      `[SCENARIO ${scenarioId}] decision_variables received ` +
+        `(x_ks_all entries: ${Array.isArray(decisionVariables.x_ks_all) ? decisionVariables.x_ks_all.length : 0})`,
+    );
+
+    await this.prisma.optimizationScenario.update({
+      where: { id: scenarioId },
+      data: { decisionVariables },
+    });
+
+    return { message: 'ok' };
+  }
+
   // ── GET CAMPAIGN RESULTS ──
   async getCampaignResults(scenarioId: string) {
     // Fetch scenario with campaigns
